@@ -12,7 +12,7 @@ import cookieParser from "cookie-parser";
 const server = express();
 server.use(express.json());
 server.use(cookieParser());
-server.use(cors({ origin: "http://localhost:3000", credentials: true}));
+server.use(cors({ origin: "https://nestro-frontend-seven.vercel.app", credentials: true}));
 server.use("/api/category", CategoryRouter);
 server.use("/api/room", RoomRouter);
 server.use("/api/product", Productrouter);
