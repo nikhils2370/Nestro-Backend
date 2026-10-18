@@ -265,3 +265,73 @@ export const getCart = async (req, res) => {
     return sendServerError(res);
   }
 };
+
+export const updateCart = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { productId, qty } = req.body;
+
+    if (!productId || qty === undefined) {
+      return sendBadRequest(res, "Product ID and quantity are required");
+    }
+
+    const cart = await CartModel.findOne({ userId });
+    if (!cart) {
+      return sendNotFound(res, "Cart not found");
+    }
+
+    if (qty <= 0) {
+      cart.items = cart.items.filter(
+        (item) => String(item.productId) !== String(productId),
+      );
+    } else {
+      const item = cart.items.find(
+        (i) => String(i.productId) === String(productId),
+      );
+      if (item) {
+        item.qty = Number(qty);
+      } else {
+        cart.items.push({ productId, qty: Number(qty) });
+      }
+    }
+
+    await cart.save();
+    return sendSuccess(res, "Cart updated successfully", { items: cart.items });
+  } catch (error) {
+    console.error("Update Cart Error:", error);
+    return sendServerError(res);
+  }
+};
+
+export const removeFromCart = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { productId } = req.params;
+
+    const cart = await CartModel.findOne({ userId });
+    if (!cart) {
+      return sendSuccess(res, "Item removed", { items: [] });
+    }
+
+    cart.items = cart.items.filter(
+      (item) => String(item.productId) !== String(productId),
+    );
+    await cart.save();
+
+    return sendSuccess(res, "Item removed from cart", { items: cart.items });
+  } catch (error) {
+    console.error("Remove from cart error:", error);
+    return sendServerError(res);
+  }
+};
+
+export const clearCart = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    await CartModel.findOneAndUpdate({ userId }, { $set: { items: [] } });
+    return sendSuccess(res, "Cart cleared successfully", { items: [] });
+  } catch (error) {
+    console.error("Clear cart error:", error);
+    return sendServerError(res);
+  }
+};

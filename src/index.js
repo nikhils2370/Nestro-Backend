@@ -8,16 +8,23 @@ import RoomRouter from "./routers/room.routes.js";
 import Productrouter from "./routers/product.routes.js";
 import Userrouter from "./routers/user.routes.js";
 import cartRouter from "./routers/cart.routes.js";
+import OrderRouter from "./routers/order.routes.js";
 import cookieParser from "cookie-parser";
 const server = express();
 server.use(express.json());
 server.use(cookieParser());
-server.use(cors({ origin: "http://localhost:3000", credentials: true}));
+server.use(
+  cors({
+    origin: "https://nestro-frontend-seven.vercel.app",
+    credentials: true,
+  }),
+);
 server.use("/api/category", CategoryRouter);
 server.use("/api/room", RoomRouter);
 server.use("/api/product", Productrouter);
 server.use("/api/user", Userrouter);
 server.use("/api/cart", cartRouter);
+server.use("/api/order", OrderRouter);
 
 server.use((error, req, res, next) => {
   console.error("Request failed:", error);
