@@ -1,5 +1,7 @@
 import UserModel from "../models/user.model.js";
 import { sendOTPEmail } from "../utls/sendOTPEmail.js";
+import Cryptr from "cryptr";
+const cryptr = new Cryptr(process.env.SECRET_KEY);
 import {
   sendBadRequest,
   sendConflict,
@@ -328,7 +330,7 @@ export const register = async (req, res) => {
     const user = await UserModel.create({
       name: cleanName,
       email: cleanEmail,
-      password,
+      password: cryptr.encrypt(password),
       role: "user",
       isVerified: false,
       otp,
@@ -536,9 +538,10 @@ export const login = async (req, res) => {
     if (!user.isVerified) {
       return sendConflict(res, "Please verify your account");
     }
+    const decPassworrd = cryptr.decrypt(user.password);
 
     // Verify password
-    if (user.password !== password) {
+    if (password !== decPassworrd) {
       return sendBadRequest(res, "Incorrect password");
     }
 

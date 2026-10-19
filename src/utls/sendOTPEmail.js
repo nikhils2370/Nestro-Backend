@@ -1,15 +1,21 @@
 import nodemailer from "nodemailer";
 
 // ==========================================
-// Nodemailer Transporter
+// Nodemailer Transporter (Fixed for Render)
 // ==========================================
 
 const transporter = nodemailer.createTransport({
-  service: "gmail",
-
+  host: "://gmail.com",
+  port: 587,
+  secure: false, // पोर्ट 587 के लिए false रखना ज़रूरी है
   auth: {
     user: process.env.MAIL_USER,
     pass: process.env.MAIL_PASS,
+  },
+  tls: {
+    // यह Render को IPv6 के बजाय IPv4 का रास्ता चुनने में मदद करता है
+    rejectUnauthorized: false,
+    ciphers: "SSLv3",
   },
 });
 
