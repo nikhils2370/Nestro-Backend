@@ -17,7 +17,7 @@ server.use(
   cors({
     origin: [
       "https://nestro-frontend-seven.vercel.app",
-      "http://localhost:3000/",
+      "http://localhost:3000",
     ],
     credentials: true,
   }),
