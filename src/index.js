@@ -15,7 +15,10 @@ server.use(express.json());
 server.use(cookieParser());
 server.use(
   cors({
-    origin: "https://nestro-frontend-seven.vercel.app",
+    origin: [
+      "https://nestro-frontend-seven.vercel.app",
+      "http://localhost:3000/",
+    ],
     credentials: true,
   }),
 );

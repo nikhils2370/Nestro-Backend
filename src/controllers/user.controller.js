@@ -1,72 +1,114 @@
 import UserModel from "../models/user.model.js";
 import { sendOTPEmail } from "../utls/sendOTPEmail.js";
 import Cryptr from "cryptr";
-const cryptr = new Cryptr(process.env.SECRET_KEY);
-import {
-  sendBadRequest,
-  sendConflict,
-  sendCreated,
-  sendNotFound,
-  sendServerError,
-  sendSuccess,
-} from "../utls/response.js";
+import { randomInt } from "node:crypto";
 import { generateToken } from "../utls/helper.js";
 
-export const logout = async (req, res) => {
+const secretKey = process.env.SECRET_KEY;
+
+if (!secretKey) {
+  throw new Error("SECRET_KEY is missing from environment variables");
+}
+
+const cryptr = new Cryptr(secretKey);
+
+const OTP_TTL_MS = 5 * 60 * 1000;
+const COOKIE_MAX_AGE = 30 * 24 * 60 * 60 * 1000;
+const isProduction = process.env.NODE_ENV === "production";
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const sendError = (res, status, message) =>
+  res.status(status).json({
+    success: false,
+    message,
+  });
+
+const createOtp = () => String(randomInt(100000, 1000000));
+
+const publicUser = (user) => ({
+  _id: user._id,
+  name: user.name,
+  email: user.email,
+  role: user.role,
+  addresses: user.addresses ?? [],
+  isVerified: user.isVerified,
+});
+
+async function deliverOtp({ user, otp }) {
   try {
-    res.clearCookie("token", {
-      httpOnly: true,
-      secure: true,
-      sameSite: "lax",
+    const result = await sendOTPEmail({
+      email: user.email,
+      name: user.name,
+      otp,
     });
 
-    return res.status(200).json({
-      success: true,
-      message: "Logout successful.",
-    });
+    if (result?.success) return true;
+
+    if (!isProduction) {
+      console.warn(
+        `[AUTH] Email delivery failed for ${user.email}. Development OTP: ${otp}`,
+      );
+    }
+
+    return false;
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: "Something went wrong while logging out.",
-    });
+    console.error("OTP email error:", error.message);
+
+    if (!isProduction) {
+      console.warn(`[AUTH] Development OTP for ${user.email}: ${otp}`);
+    }
+
+    return false;
   }
+}
+
+// ==================== LOGOUT ====================
+
+export const logout = async (req, res) => {
+  res.clearCookie("token", {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: "lax",
+    path: "/",
+  });
+
+  return res.status(200).json({
+    success: true,
+    message: "Logout successful.",
+  });
 };
+
+// ==================== GET PROFILE ====================
 
 export const getMe = async (req, res) => {
-  try {
-    const user = req.user;
-    return res.status(200).json({
-      success: true,
-      message: "Registration successful",
-      user,
-    });
-  } catch (error) {
-    return sendServerError(res);
+  if (!req.user) {
+    return sendError(res, 401, "Please login first");
   }
+
+  return res.status(200).json({
+    success: true,
+    message: "Profile fetched successfully",
+    user: publicUser(req.user),
+  });
 };
+
+// ==================== UPDATE PROFILE ====================
 
 export const updateProfile = async (req, res) => {
   try {
     const userId = req.user?._id;
 
     if (!userId) {
-      return res.status(401).json({
-        success: false,
-        message: "Please login to update your profile",
-      });
+      return sendError(res, 401, "Please login to update your profile");
     }
 
-    const { name, email, addresses } = req.body;
-
+    const { name, email, addresses } = req.body ?? {};
     const updateData = {};
 
     // Update name
     if (name !== undefined) {
       if (typeof name !== "string" || !name.trim()) {
-        return res.status(400).json({
-          success: false,
-          message: "Name is required",
-        });
+        return sendError(res, 400, "Name is required");
       }
 
       updateData.name = name.trim();
@@ -74,34 +116,22 @@ export const updateProfile = async (req, res) => {
 
     // Update email
     if (email !== undefined) {
-      if (typeof email !== "string" || !email.trim()) {
-        return res.status(400).json({
-          success: false,
-          message: "Valid email is required",
-        });
+      if (
+        typeof email !== "string" ||
+        !EMAIL_REGEX.test(email.trim().toLowerCase())
+      ) {
+        return sendError(res, 400, "Please enter a valid email");
       }
 
       const cleanEmail = email.trim().toLowerCase();
 
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-      if (!emailRegex.test(cleanEmail)) {
-        return res.status(400).json({
-          success: false,
-          message: "Please enter a valid email",
-        });
-      }
-
-      const existingUser = await UserModel.findOne({
+      const existingUser = await UserModel.exists({
         email: cleanEmail,
         _id: { $ne: userId },
       });
 
       if (existingUser) {
-        return res.status(409).json({
-          success: false,
-          message: "This email is already registered",
-        });
+        return sendError(res, 409, "This email is already registered");
       }
 
       updateData.email = cleanEmail;
@@ -110,10 +140,7 @@ export const updateProfile = async (req, res) => {
     // Update addresses
     if (addresses !== undefined) {
       if (!Array.isArray(addresses)) {
-        return res.status(400).json({
-          success: false,
-          message: "Addresses must be an array",
-        });
+        return sendError(res, 400, "Addresses must be an array");
       }
 
       const requiredFields = [
@@ -125,56 +152,48 @@ export const updateProfile = async (req, res) => {
         "state",
       ];
 
+      const cleanAddresses = [];
+
       for (const address of addresses) {
-        if (!address || typeof address !== "object") {
-          return res.status(400).json({
-            success: false,
-            message: "Invalid address data",
-          });
+        if (!address || typeof address !== "object" || Array.isArray(address)) {
+          return sendError(res, 400, "Invalid address data");
         }
 
         for (const field of requiredFields) {
           if (typeof address[field] !== "string" || !address[field].trim()) {
-            return res.status(400).json({
-              success: false,
-              message: `${field} is required in every address`,
-            });
+            return sendError(res, 400, `${field} is required in every address`);
           }
         }
+
+        cleanAddresses.push({
+          fullName: address.fullName.trim(),
+          mobile: address.mobile.trim(),
+          pincode: address.pincode.trim(),
+          addressLine: address.addressLine.trim(),
+          city: address.city.trim(),
+          state: address.state.trim(),
+          country:
+            typeof address.country === "string" && address.country.trim()
+              ? address.country.trim()
+              : "India",
+          isDefault: address.isDefault === true,
+        });
       }
 
-      // Only accept permitted address fields.
-      const cleanAddresses = addresses.map((address) => ({
-        fullName: address.fullName.trim(),
-        mobile: address.mobile.trim(),
-        pincode: address.pincode.trim(),
-        addressLine: address.addressLine.trim(),
-        city: address.city.trim(),
-        state: address.state.trim(),
-        country:
-          typeof address.country === "string" && address.country.trim()
-            ? address.country.trim()
-            : "India",
-        isDefault: address.isDefault === true,
-      }));
-
-      // Keep only one default address.
+      // Allow only one default address
       const defaultIndex = cleanAddresses.findIndex(
         (address) => address.isDefault,
       );
 
       cleanAddresses.forEach((address, index) => {
-        address.isDefault = index === defaultIndex;
+        address.isDefault = defaultIndex !== -1 && index === defaultIndex;
       });
 
       updateData.addresses = cleanAddresses;
     }
 
     if (Object.keys(updateData).length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "No valid profile fields provided",
-      });
+      return sendError(res, 400, "No valid profile fields provided");
     }
 
     const updatedUser = await UserModel.findByIdAndUpdate(
@@ -187,318 +206,151 @@ export const updateProfile = async (req, res) => {
     ).select("-password -otp -otpEcpire");
 
     if (!updatedUser) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      });
+      return sendError(res, 404, "User not found");
     }
 
     return res.status(200).json({
       success: true,
       message: "Profile updated successfully",
-      user: updatedUser,
+      user: publicUser(updatedUser),
     });
   } catch (error) {
     console.error("Update Profile Error:", error);
 
     if (error.code === 11000) {
-      return res.status(409).json({
-        success: false,
-        message: "This email is already registered",
-      });
+      return sendError(res, 409, "This email is already registered");
     }
 
     if (error.name === "ValidationError") {
-      return res.status(400).json({
-        success: false,
-        message: error.message,
-      });
+      return sendError(res, 400, error.message);
     }
 
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
+    return sendError(res, 500, "Internal server error");
   }
 };
 
-// ==========================================
-// Register User
-// ==========================================
+// ==================== REGISTER ====================
+
 export const register = async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
 
-    // ==========================================
-    // Validation
-    // ==========================================
-    if (!name || !email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: "Name, email and password are required",
-      });
+    const email =
+      typeof req.body?.email === "string"
+        ? req.body.email.trim().toLowerCase()
+        : "";
+
+    const password = req.body?.password;
+
+    if (!name || !email || typeof password !== "string") {
+      return sendError(res, 400, "Name, email and password are required");
+    }
+
+    if (!EMAIL_REGEX.test(email)) {
+      return sendError(res, 400, "Please enter a valid email");
     }
 
     if (password.length < 6) {
-      return res.status(400).json({
-        success: false,
-        message: "Password must be at least 6 characters",
-      });
+      return sendError(res, 400, "Password must be at least 6 characters");
     }
 
-    // ==========================================
-    // Clean Data
-    // ==========================================
-    const cleanName = name.trim();
-    const cleanEmail = email.trim().toLowerCase();
+    let user = await UserModel.findOne({ email });
+    const isNewUser = !user;
 
-    // ==========================================
-    // Check Existing User
-    // ==========================================
-    const existingUser = await UserModel.findOne({
-      email: cleanEmail,
-    });
+    if (user?.isVerified) {
+      return sendError(res, 409, "Email is already registered");
+    }
 
-    // ==========================================
-    // Existing User
-    // ==========================================
-    if (existingUser) {
-      // ------------------------------------------
-      // Already Verified
-      // ------------------------------------------
-      if (existingUser.isVerified) {
-        return res.status(409).json({
-          success: false,
-          message: "Email is already registered",
-        });
-      }
+    const otp = createOtp();
+    const otpEcpire = new Date(Date.now() + OTP_TTL_MS);
 
-      // ------------------------------------------
-      // Existing but Not Verified
-      // Generate New OTP
-      // ------------------------------------------
-      const otp = Math.floor(100000 + Math.random() * 900000);
+    if (user) {
+      user.name = name;
+      user.password = cryptr.encrypt(password);
+      user.otp = otp;
+      user.otpEcpire = otpEcpire;
 
-      const otpEcpire = new Date(Date.now() + 5 * 60 * 1000);
-
-      existingUser.name = cleanName;
-      existingUser.password = password;
-      existingUser.otp = otp;
-      existingUser.otpEcpire = otpEcpire;
-
-      console.log(`[AUTH] Register OTP for ${existingUser.email}:`, otp);
-
-      // ------------------------------------------
-      // Send New OTP Email
-      // ------------------------------------------
-      const emailResponse = await sendOTPEmail({
-        email: existingUser.email,
-        name: existingUser.name,
+      await user.save();
+    } else {
+      user = await UserModel.create({
+        name,
+        email,
+        password: cryptr.encrypt(password),
+        role: "user",
+        isVerified: false,
         otp,
-      });
-
-      if (!emailResponse?.success) {
-        console.warn(
-          `[WARN] Email sending failed for ${existingUser.email}. Dev OTP is: ${otp}`,
-        );
-        // Allow developer/user to verify with console OTP in dev mode
-        return res.status(200).json({
-          success: true,
-          message:
-            "OTP generated (check server console if email is not received)",
-          userId: existingUser._id,
-        });
-      }
-
-      return res.status(200).json({
-        success: true,
-        message: "OTP sent successfully",
-        userId: existingUser._id,
+        otpEcpire,
+        status: true,
       });
     }
 
-    // ==========================================
-    // Generate OTP
-    // ==========================================
-    const otp = Math.floor(100000 + Math.random() * 900000);
-    const otpEcpire = new Date(Date.now() + 5 * 60 * 1000);
-    console.log(`[AUTH] Register OTP for ${cleanEmail}:`, otp);
+    const emailSent = await deliverOtp({ user, otp });
 
-    // ==========================================
-    // Create User
-    // ==========================================
-    const user = await UserModel.create({
-      name: cleanName,
-      email: cleanEmail,
-      password: cryptr.encrypt(password),
-      role: "user",
-      isVerified: false,
-      otp,
-      otpEcpire,
-      status: true,
-    });
-
-    // ==========================================
-    // Send OTP Email
-    // ==========================================
-    const emailResponse = await sendOTPEmail({
-      email: user.email,
-      name: user.name,
-      otp,
-    });
-
-    // ==========================================
-    // Email Failed
-    // ==========================================
-    if (!emailResponse?.success) {
-      console.warn(
-        `[WARN] Email sending failed for ${cleanEmail}. Dev OTP is: ${otp}`,
-      );
-      // In development or if mail credentials fail, keep user so OTP can be entered from console
-      return res.status(201).json({
-        success: true,
-        message:
-          "Registration successful. OTP generated (check server console if email is delayed).",
-        userId: user._id,
-      });
-    }
-
-    // ==========================================
-    // Testing OTP
-    // ==========================================
-    // console.log(
-    //   `Register OTP sent to ${user.email}:`,
-    //   otp
-    // );
-
-    // ==========================================
-    // Response
-    // ==========================================
-    return res.status(201).json({
+    return res.status(isNewUser ? 201 : 200).json({
       success: true,
-      message: "Registration successful. OTP has been sent to your email.",
+      message: emailSent
+        ? "OTP sent successfully"
+        : "OTP generated. If email is unavailable, check the server console in development.",
       userId: user._id,
     });
   } catch (error) {
     console.error("Register Error:", error);
 
-    // Duplicate email protection
     if (error.code === 11000) {
-      return res.status(409).json({
-        success: false,
-        message: "Email is already registered",
-      });
+      return sendError(res, 409, "Email is already registered");
     }
 
-    return res.status(500).json({
-      success: false,
-      message: "Internal Server Error",
-    });
+    return sendError(res, 500, "Internal server error");
   }
 };
 
-// ==========================================
-// Verify Register OTP
-// ==========================================
+// ==================== VERIFY REGISTER OTP ====================
+
 export const verifyRegisterOTP = async (req, res) => {
   try {
-    const { email, otp } = req.body;
+    const email =
+      typeof req.body?.email === "string"
+        ? req.body.email.trim().toLowerCase()
+        : "";
 
-    // ==========================================
-    // Validation
-    // ==========================================
-    if (!email || !otp) {
-      return res.status(400).json({
-        success: false,
-        message: "Email and OTP are required",
-      });
+    const enteredOTP = String(req.body?.otp ?? "").trim();
+
+    if (!email || !enteredOTP) {
+      return sendError(res, 400, "Email and OTP are required");
     }
 
-    const cleanEmail = email.trim().toLowerCase();
-    const enteredOTP = Number(otp);
-
-    // ==========================================
-    // Validate OTP Format
-    // ==========================================
-    if (
-      !Number.isInteger(enteredOTP) ||
-      enteredOTP < 100000 ||
-      enteredOTP > 999999
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "Please enter a valid 6-digit OTP",
-      });
+    if (!EMAIL_REGEX.test(email) || !/^\d{6}$/.test(enteredOTP)) {
+      return sendError(res, 400, "Please enter a valid email and 6-digit OTP");
     }
 
-    // ==========================================
-    // Find User
-    // ==========================================
-    const user = await UserModel.findOne({
-      email: cleanEmail,
-    });
+    const user = await UserModel.findOne({ email }).select("+otp +otpEcpire");
 
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      });
+      return sendError(res, 404, "User not found");
     }
 
-    // ==========================================
-    // Already Verified
-    // ==========================================
     if (user.isVerified) {
-      return res.status(400).json({
-        success: false,
-        message: "Email is already verified",
-      });
+      return sendError(res, 400, "Email is already verified");
     }
 
-    // ==========================================
-    // Check OTP Exists
-    // ==========================================
     if (!user.otp || !user.otpEcpire) {
-      return res.status(400).json({
-        success: false,
-        message: "OTP not found. Please request a new OTP.",
-      });
+      return sendError(res, 400, "OTP not found. Please request a new OTP.");
     }
 
-    // ==========================================
-    // Check OTP Expiry
-    // ==========================================
-    if (user.otpEcpire.getTime() < Date.now()) {
-      return res.status(400).json({
-        success: false,
-        message: "OTP has expired. Please request a new OTP.",
-      });
+    if (new Date(user.otpEcpire).getTime() < Date.now()) {
+      return sendError(res, 400, "OTP has expired. Please request a new OTP.");
     }
 
-    // ==========================================
-    // Check OTP
-    // ==========================================
-    if (enteredOTP !== Number(user.otp)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid OTP",
-      });
+    if (enteredOTP !== String(user.otp)) {
+      return sendError(res, 400, "Invalid OTP");
     }
 
-    // ==========================================
-    // Verify User
-    // ==========================================
     user.isVerified = true;
-
-    // Remove OTP
     user.otp = undefined;
     user.otpEcpire = undefined;
 
     await user.save();
 
-    // ==========================================
-    // Response
-    // ==========================================
     return res.status(200).json({
       success: true,
       message: "Email verified successfully",
@@ -506,71 +358,70 @@ export const verifyRegisterOTP = async (req, res) => {
   } catch (error) {
     console.error("Verify Register OTP Error:", error);
 
-    return res.status(500).json({
-      success: false,
-      message: "Internal Server Error",
-    });
+    return sendError(res, 500, "Internal server error");
   }
 };
 
-// ==========================================
-// User login
-// ==========================================
+// ==================== LOGIN ====================
+
 export const login = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const email =
+      typeof req.body?.email === "string"
+        ? req.body.email.trim().toLowerCase()
+        : "";
 
-    // Validation
-    if (!email || !password) {
-      return sendBadRequest(res, "Email and password are required");
+    const password = req.body?.password;
+
+    if (!email || typeof password !== "string" || !password) {
+      return sendError(res, 400, "Email and password are required");
     }
 
-    // Find user
-    const user = await UserModel.findOne({
-      email: email.trim().toLowerCase(),
-    });
+    if (!EMAIL_REGEX.test(email)) {
+      return sendError(res, 400, "Please enter a valid email");
+    }
+
+    const user = await UserModel.findOne({ email }).select("+password");
 
     if (!user) {
-      return sendConflict(res, "Please create your account");
+      return sendError(res, 401, "Invalid email or password");
     }
 
-    // Verify account
     if (!user.isVerified) {
-      return sendConflict(res, "Please verify your account");
-    }
-    const decPassworrd = cryptr.decrypt(user.password);
-
-    // Verify password
-    if (password !== decPassworrd) {
-      return sendBadRequest(res, "Incorrect password");
+      return sendError(res, 403, "Please verify your account");
     }
 
-    // Generate JWT
+    let passwordMatches = false;
+
+    try {
+      passwordMatches = password === cryptr.decrypt(user.password);
+    } catch {
+      passwordMatches = false;
+    }
+
+    if (!passwordMatches) {
+      return sendError(res, 401, "Invalid email or password");
+    }
+
     const token = generateToken(user._id);
 
-    // Set cookie
     res.cookie("token", token, {
-      maxAge: 30 * 24 * 60 * 60 * 1000,
+      maxAge: COOKIE_MAX_AGE,
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
+      secure: isProduction,
       sameSite: "lax",
       path: "/",
     });
 
-    // Send token and user to frontend
     return res.status(200).json({
       success: true,
       message: "Login successful",
       token,
-      user: {
-        _id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-      },
+      user: publicUser(user),
     });
   } catch (error) {
-    console.error("Login error:", error);
-    return sendServerError(res);
+    console.error("Login Error:", error);
+
+    return sendError(res, 500, "Internal server error");
   }
 };
